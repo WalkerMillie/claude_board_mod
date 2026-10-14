@@ -1,0 +1,12 @@
+{
+  "name": "claude-board-mod",
+  "description": "Claude Code 자동 메모리를 작업 보드로 보여 주는 mod",
+  "owner": { "name": "WalkerMillie" },
+  "plugins": [
+    {
+      "name": "work-board",
+      "source": "./",
+      "description": "Claude Code 자동 메모리(MEMORY.md)를 카드 보드로 보여 주는 패널 (/board)"
+    }
+  ]
+}
