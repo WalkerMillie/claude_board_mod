@@ -1,9 +1,15 @@
-import type { WorkBoard, WorkBoardItem } from '../types'
+import type { WorkBoard, WorkBoardFilter, WorkBoardItem } from '../types'
 
 const SECTIONS: Record<string, WorkBoardItem['group']> = {
   '활성 작업': 'active',
   '보류·미착수': 'hold',
 }
+
+/** Days without an edit before a work memo counts as stale. */
+export const STALE_DAYS = 14
+
+const DONE = /((?<!미)완료|해소|닫힘|폐기|머지됨|\b(done|merged|resolved|closed)\b)/i
+const EVERGREEN = /^(feedback|user|reference)[_-]/
 
 const LINK = /\[((?:[^[\]]|\[[^\]]*\])+)\]\(([^)\s]+\.md)\)/g
 
@@ -104,13 +110,79 @@ export function parseBoard(markdown: string): WorkBoard {
       if ((item.isStar || !isStar) && !items.some(i => i.id === item.id)) items.push(item)
     }
   }
-  if (!isStar) return { mode: 'all', active: items, hold: [] }
+  if (!isStar) return { mode: 'all', active: items, hold: [], tidy: [] }
   const sorted = newestFirst(items)
   return {
     mode: 'star',
     active: sorted.filter(i => i.group === 'active'),
     hold: sorted.filter(i => i.group === 'hold'),
+    tidy: [],
   }
+}
+
+/**
+ * The work lines of an index worth a tidy, newest first: marked done with
+ * nothing left, untouched for `staleDays`, or linking a file the folder lacks.
+ * `mtimes` maps each file of the folder to its last edit; null when the folder
+ * could not be listed, which leaves only the done check. Feedback, user and
+ * reference memos never qualify, and on a ★ index only 활성 / 보류 lines do.
+ */
+export function tidyCandidates(
+  markdown: string,
+  mtimes: Record<string, number> | null,
+  nowMs: number,
+  staleDays = STALE_DAYS,
+): WorkBoardItem[] {
+  const lines = markdown.split('\n')
+  const isStar = lines.some(l => l.startsWith('## ') && sectionOf(l.slice(3)))
+  const out: WorkBoardItem[] = []
+  let group: WorkBoardItem['group'] | null = isStar ? null : 'active'
+  let section = ''
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      section = headingOf(line)
+      group = isStar ? sectionOf(line.slice(3)) : 'active'
+      continue
+    }
+    if (!group || !/^\s*[-*] /.test(line)) continue
+    for (const [n, m] of [...line.matchAll(LINK)].entries()) {
+      const [whole, label = '', file = ''] = m
+      if (EVERGREEN.test(file) || out.some(i => i.id === file)) continue
+      const after = n === 0 && group === 'active' ? line.slice((m.index ?? 0) + whole.length).replace(/\[[^\]]*\]\([^)]*\)/g, '') : ''
+      const item = itemOf(label, file, group, section, after)
+      const reasons: string[] = []
+      if (mtimes && !file.includes('/') && !(file in mtimes)) {
+        reasons.push('파일 없음')
+      } else {
+        if (!item.isStar && !item.remaining.length && DONE.test(`${label} ${after}`)) reasons.push('완료 표시')
+        const at = mtimes?.[file]
+        const days = at ? Math.floor((nowMs - at) / 86_400_000) : 0
+        if (days >= staleDays) reasons.push(`${days}일째 수정 없음`)
+      }
+      if (reasons.length) out.push({ ...item, reason: reasons.join(' · ') })
+    }
+  }
+  return newestFirst(out)
+}
+
+/** The request the tidy button sends: the candidates and the rules for moving them. */
+export function tidyPrompt(dir: string, items: WorkBoardItem[]): string {
+  return [
+    `작업 보드에서 고른 메모 정리 후보 ${items.length}건을 정리해 주세요.`,
+    '',
+    `메모 폴더: ${dir}`,
+    '',
+    '후보:',
+    ...items.map(i => `- ${i.file} — ${i.title} (${i.reason ?? ''})`),
+    '',
+    '원칙:',
+    '- 메모 파일은 지우지 않습니다. MEMORY.md 에서 그 줄을 빼서 아카이브 인덱스로 옮깁니다. MEMORY.md 에 이미 링크된 아카이브 인덱스가 있으면 거기에 붙이고, 없으면 같은 폴더에 archive_index.md 를 만들어 MEMORY.md 맨 위에 링크를 겁니다.',
+    '- 후보마다 메모 본문을 읽고 끝난 작업인지 판단합니다. 남은 조치가 있거나 판단이 서지 않으면 옮기지 않고 물어볼 목록에 넣습니다.',
+    "- '파일 없음' 후보는 MEMORY.md 에서 그 링크만 정리합니다.",
+    '- 같은 주제를 다루는 메모가 겹치면 합치자고 제안만 하고, 합치기 전에 확인을 받습니다.',
+    '- MEMORY.md 에 남는 줄은 링크와 ★·🔴 표시를 그대로 둡니다.',
+    '- 끝나면 옮긴 것·남긴 것·물어볼 것을 나눠서 짧게 보고합니다.',
+  ].join('\n')
 }
 
 /** A topic file's body without its frontmatter. */
@@ -167,7 +239,7 @@ export function ancestorsOf(path: string): string[] {
 /** The items a filter and a search leave, the search over every text of an item. */
 export function filterItems(
   items: WorkBoardItem[],
-  filter: 'all' | 'left' | 'caution' | 'hold',
+  filter: WorkBoardFilter,
   query: string,
 ): WorkBoardItem[] {
   const q = query.trim().toLowerCase()

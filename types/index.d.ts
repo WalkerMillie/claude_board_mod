@@ -14,17 +14,25 @@ export type WorkBoardItem = {
   /** Each `🔴…` part of the line. */
   cautions: string[]
   isStar: boolean
+  /** Why a tidy candidate is one: done-looking, untouched for long, or no file. */
+  reason?: string
 }
 
 /**
  * `star`: the index has 활성 작업 / 보류·미착수 sections and only ★ lines show.
  * `all`: any other MEMORY.md; every linked line shows, grouped by its heading.
  */
-export type WorkBoard = { mode: 'star' | 'all'; active: WorkBoardItem[]; hold: WorkBoardItem[] }
+export type WorkBoard = {
+  mode: 'star' | 'all'
+  active: WorkBoardItem[]
+  hold: WorkBoardItem[]
+  /** Lines worth a tidy, each with its reason; empty until the folder is listed. */
+  tidy: WorkBoardItem[]
+}
 
 export type WorkBoardDetail = { file: string; text: string }
 
-export type WorkBoardFilter = 'all' | 'left' | 'caution' | 'hold'
+export type WorkBoardFilter = 'all' | 'left' | 'caution' | 'hold' | 'tidy'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -36,6 +44,8 @@ declare module 'claude-code' {
       detail: WorkBoardDetail | null
       filter: WorkBoardFilter
       query: string
+      /** The tidy button was pressed once; the next press sends the request. */
+      armed: boolean
       error: string | null
     }
   }

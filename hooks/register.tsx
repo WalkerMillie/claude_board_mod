@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { WorkBoard, WorkBoardFilter, WorkBoardItem } from '../types'
-import { ancestorsOf, bandOf, bodyOf, filterItems, kstDay, parseBoard, projectKey } from './parse'
+import { ancestorsOf, bandOf, bodyOf, filterItems, kstDay, parseBoard, projectKey, STALE_DAYS, tidyCandidates, tidyPrompt } from './parse'
 
 const BOARD = { plugin: 'work-board', key: 'board' } as const
 const MEMORY = { plugin: 'work-board', key: 'memoryDir' } as const
@@ -9,6 +9,7 @@ const SELECTED = { plugin: 'work-board', key: 'selected' } as const
 const DETAIL = { plugin: 'work-board', key: 'detail' } as const
 const FILTER = { plugin: 'work-board', key: 'filter' } as const
 const QUERY = { plugin: 'work-board', key: 'query' } as const
+const ARMED = { plugin: 'work-board', key: 'armed' } as const
 const ERROR = { plugin: 'work-board', key: 'error' } as const
 
 const PANE_ID = 'work-board'
@@ -17,14 +18,22 @@ const BANDS = ['오늘', '어제', '이번 주', '이번 달', '그 이전', '�
 
 /** The one dim line under a card's title: what is left first, else the summary. */
 export function hintOf(item: WorkBoardItem): string {
+  if (item.reason) return [item.reason, item.summary].filter(Boolean).join(' · ')
   if (item.remaining.length) return `남음 ${item.remaining.join(' / ')}`
   return item.summary
 }
 
-/** The items a filter shows: held ones only under `hold`, active ones otherwise. */
+/** The items a filter shows: held ones under `hold`, tidy candidates under `tidy`, active ones otherwise. */
 export function visibleItems(board: WorkBoard | null, filter: WorkBoardFilter, query: string): WorkBoardItem[] {
   if (!board) return []
-  return filterItems(filter === 'hold' ? board.hold : board.active, filter, query)
+  const pool = filter === 'hold' ? board.hold : filter === 'tidy' ? board.tidy : board.active
+  return filterItems(pool, filter, query)
+}
+
+/** The item a card opens: a tidy candidate first under `tidy`, so its reason shows. */
+export function itemById(board: WorkBoard, filter: WorkBoardFilter, id: string): WorkBoardItem | undefined {
+  const all = [...board.active, ...board.hold]
+  return (filter === 'tidy' ? [...board.tidy, ...all] : [...all, ...board.tidy]).find(i => i.id === id)
 }
 
 /** Cards in their groups: recency bands on a ★ board, headings on any other. */
@@ -53,6 +62,31 @@ async function findMemoryDir($: EngineInterface): Promise<string | null> {
   return null
 }
 
+/** Each file of the memory folder and its last edit, or null when the folder cannot be listed. */
+async function mtimesOf($: EngineInterface, dir: string): Promise<Record<string, number> | null> {
+  try {
+    return Object.fromEntries((await $.fs.list(dir)).map(e => [e.name, e.mtimeMs]))
+  } catch {
+    return null
+  }
+}
+
+/** Hands the shown tidy candidates to Claude as a prompt, which runs once the session is idle. */
+async function sendTidy($: EngineInterface): Promise<void> {
+  const board = (await $.state.get(BOARD)).value
+  const dir = (await $.state.get(MEMORY)).value
+  const query = (await $.state.get(QUERY)).value ?? ''
+  const items = visibleItems(board ?? null, 'tidy', query)
+  if (!dir || !items.length) return
+  void $.prompt
+    .submit({ text: tidyPrompt(dir, items) })
+    .then(r => {
+      if (r.drop) $.ui.toast(`정리 요청이 들어가지 못했습니다: ${r.drop}`)
+    })
+    .catch(() => $.ui.toast('정리 요청을 보내지 못했습니다.'))
+  $.ui.toast(`정리 후보 ${items.length}건을 Claude 에게 맡겼습니다. 하던 일이 끝나면 시작합니다.`)
+}
+
 async function load($: EngineInterface): Promise<void> {
   try {
     const dir = await findMemoryDir($)
@@ -62,7 +96,8 @@ async function load($: EngineInterface): Promise<void> {
       await $.state.set(ERROR, null)
       return
     }
-    await $.state.set(BOARD, parseBoard(await $.fs.read(`${dir}/MEMORY.md`)))
+    const text = await $.fs.read(`${dir}/MEMORY.md`)
+    await $.state.set(BOARD, { ...parseBoard(text), tidy: tidyCandidates(text, await mtimesOf($, dir), await $.clock.now()) })
     await $.state.set(ERROR, null)
   } catch (err) {
     await $.state.set(ERROR, `MEMORY.md 를 읽지 못했습니다: ${String(err)}`)
@@ -103,6 +138,14 @@ async function step($: EngineInterface, by: number): Promise<void> {
 }
 
 async function press($: EngineInterface, key: string): Promise<void> {
+  // The tidy button asks twice; any other press takes the first one back.
+  if (key === 'tidy') {
+    const armed = (await $.state.get(ARMED)).value
+    await $.state.set(ARMED, !armed)
+    if (armed) await sendTidy($)
+    return
+  }
+  await $.state.set(ARMED, false)
   if (key === 'refresh') {
     await load($)
     const picked = (await $.state.get(SELECTED)).value
@@ -161,7 +204,10 @@ export const register: Register = on => {
   })
 
   on('ui.input', { requestId: PANE_ID }, async ($, e) => {
-    if (e.element === 'search') await $.state.set(QUERY, e.value)
+    if (e.element === 'search') {
+      await $.state.set(QUERY, e.value)
+      await $.state.set(ARMED, false)
+    }
     return { element: e.element, value: e.value }
   })
 
@@ -172,6 +218,7 @@ export const register: Register = on => {
     const board = (await $.state.get(BOARD)).value
     const memoryDir = (await $.state.get(MEMORY)).value
     const error = (await $.state.get(ERROR)).value
+    const armed = (await $.state.get(ARMED)).value ?? false
     const picked = (await $.state.get(SELECTED)).value
     const detail = (await $.state.get(DETAIL)).value
     const filter = (await $.state.get(FILTER)).value ?? 'all'
@@ -183,7 +230,7 @@ export const register: Register = on => {
     const shown = visibleItems(board ?? null, filter, query)
     const groups = board ? groupsOf(board, shown, now) : []
     const order = groups.flatMap(g => g.items)
-    const item = picked && board ? [...board.active, ...board.hold].find(i => i.id === picked) : undefined
+    const item = picked && board ? itemById(board, filter, picked) : undefined
 
     if (item) {
       const at = order.findIndex(i => i.id === item.id)
@@ -203,6 +250,7 @@ export const register: Register = on => {
             {meta ? <Text dimColor>{meta}</Text> : null}
             <Text bold>{item.title}</Text>
             {item.summary ? <Text dimColor>{item.summary}</Text> : null}
+            {item.reason ? <Text color="suggestion">{`정리 후보: ${item.reason}`}</Text> : null}
           </Box>
 
           {item.remaining.length ? (
@@ -233,6 +281,7 @@ export const register: Register = on => {
       { key: 'left', label: '남은 조치', n: active.filter(i => i.remaining.length).length },
       { key: 'caution', label: '주의', n: active.filter(i => i.cautions.length).length },
       ...(board?.hold.length ? [{ key: 'hold' as const, label: '보류', n: board.hold.length }] : []),
+      ...(board?.tidy.length ? [{ key: 'tidy' as const, label: '정리 후보', n: board.tidy.length }] : []),
     ]
 
     // Both lines of a card open it: a Box takes no press and a Button only a
@@ -307,6 +356,22 @@ export const register: Register = on => {
         ) : null}
 
         {error ? <Text color="error">{error}</Text> : null}
+
+        {filter === 'tidy' && order.length ? (
+          <Box flexDirection="column" borderStyle="round" borderColor="suggestion" paddingX={1}>
+            <Text bold>{`정리 후보 ${order.length}건`}</Text>
+            <Text dimColor>{`완료 표시가 있거나 ${STALE_DAYS}일 넘게 수정되지 않았거나 파일이 없는 작업 메모입니다.`}</Text>
+            <Text dimColor>맡기면 Claude 가 본문을 읽고 판단합니다. 메모 파일은 지우지 않고 MEMORY.md 의 줄만 아카이브로 옮기며, 하던 일이 끝난 뒤에 시작합니다.</Text>
+            <Box flexDirection="row" gap={1}>
+              <Button
+                key="tidy"
+                label={armed ? `한 번 더 누르면 ${order.length}건을 맡깁니다` : `정리 맡기기 (${order.length}건)`}
+                variant={armed ? 'primary' : undefined}
+                onPress={tap('tidy')}
+              />
+            </Box>
+          </Box>
+        ) : null}
 
         {!memoryDir && !error ? (
           <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
