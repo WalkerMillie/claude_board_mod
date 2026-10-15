@@ -151,6 +151,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await pane.press({ key: 'back' })
     await pane.press({ key: 'clear' })
     expect(await pane.find({ key: 'open:a.md' })).toBeDefined()
+
+    // The hint line under the title opens the card too.
+    await pane.press({ key: 'peek:a.md' })
+    expect(await pane.find({ key: 'back' })).toBeDefined()
+    expect((await pane.findAll({ type: 'Text', text: '남은 조치 1' })).length).toBe(1)
   })
 }
 

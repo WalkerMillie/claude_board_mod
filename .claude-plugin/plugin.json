@@ -1,6 +1,6 @@
 {
   "name": "work-board",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude Code 자동 메모리(MEMORY.md)를 카드 보드로: /board 로 열고, 하루 첫 새 세션에 한 번 자동으로 뜬다",
   "author": { "name": "WalkerMillie" },
   "types": "./types/index.d.ts"

@@ -118,7 +118,7 @@ async function press($: EngineInterface, key: string): Promise<void> {
     const want = key.slice('filter:'.length) as WorkBoardFilter
     const now = (await $.state.get(FILTER)).value ?? 'all'
     await $.state.set(FILTER, want === now ? 'all' : want)
-  } else if (key.startsWith('open:')) {
+  } else if (key.startsWith('open:') || key.startsWith('peek:')) {
     await select($, key.slice('open:'.length))
   } else if (key.startsWith('edit:')) {
     const dir = (await $.state.get(MEMORY)).value
@@ -235,20 +235,25 @@ export const register: Register = on => {
       ...(board?.hold.length ? [{ key: 'hold' as const, label: '보류', n: board.hold.length }] : []),
     ]
 
+    // Both lines of a card open it: a Box takes no press and a Button only a
+    // string label, so the title line and the hint line are each a button.
     const card = (i: WorkBoardItem) => {
       const hint = hintOf(i)
-      const marks = (
-        <Box flexDirection="row" gap={1}>
-          {i.remaining.length ? <Text color="warning">{`▸ 남음 ${i.remaining.length}`}</Text> : null}
-          {i.cautions.length ? <Text color="error">{`● 주의 ${i.cautions.length}`}</Text> : null}
-          {hint ? <Text dimColor wrap="truncate-end">{hint}</Text> : null}
-        </Box>
-      )
+      const marks =
+        i.remaining.length || i.cautions.length || hint ? (
+          <Box flexDirection="row" gap={1}>
+            {i.remaining.length ? <Text color="warning">{`▸ 남음 ${i.remaining.length}`}</Text> : null}
+            {i.cautions.length ? <Text color="error">{`● 주의 ${i.cautions.length}`}</Text> : null}
+            <Button key={`peek:${i.id}`} label={hint || '상세 보기'} plain dimColor onPress={tap(`open:${i.id}`)} />
+          </Box>
+        ) : null
       const title = (
-        <Box flexDirection="row">
-          {i.date ? <Text dimColor>{`${i.date}  `}</Text> : null}
-          <Button key={`open:${i.id}`} label={i.title} plain onPress={tap(`open:${i.id}`)} />
-        </Box>
+        <Button
+          key={`open:${i.id}`}
+          label={i.date ? `${i.date}  ${i.title}` : i.title}
+          plain
+          onPress={tap(`open:${i.id}`)}
+        />
       )
       if (isCompact) {
         return (
